@@ -13,3 +13,6 @@ A two-player online quarter-flick game with a Battlezone-style vector look. Play
 - Pull strength is measured on screen, so the same pull sends every quarter the same distance, and distance grows evenly with pull
 - Camera always keeps all three quarters on screen
 - Mouse wheel / pinch to zoom; zoom all the way out (or press F / FIT) to see the whole table
+
+**v2.2**
+- Move the camera with WASD or the arrow keys (C re-centers); it snaps back to the quarters at the start of each turn

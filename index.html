@@ -107,7 +107,7 @@
         <li>Point values, table size, physics and more can be changed in SETTINGS. Online, the host's rules are used.</li>
       </ul>
     </details>
-    <div class="ver">v2.1</div>
+    <div class="ver">v2.2</div>
   </div>
 </div>
 
@@ -284,7 +284,7 @@ const g = {
   aim: null, remoteAim: null, hover: -1,
 };
 // camera: position, height and tilt ease toward targets; zoom is local-only
-const cam = { x: 0, z: 0, h: 3.2, pitch: 0.24, tx: 0, tz: 0, th: 3.2, tp: 0.24, zoom: 1, basis: null };
+const cam = { x: 0, z: 0, h: 3.2, pitch: 0.24, tx: 0, tz: 0, th: 3.2, tp: 0.24, zoom: 1, basis: null, panX: 0, panZ: 0 };
 const ZMIN = 0.6, ZFIT = 1.5, ZMAX = 2.5;
 
 function resetCoins() {
@@ -414,13 +414,13 @@ function startGame(starter, rules) {
   RU = clean('rules', rules || cfg.rules);
   g.scores = [0, 0]; g.starter = starter; g.turn = starter; g.flicks = 0;
   g.timer = 0; g.after = null; g.pending = null; g.aim = null; g.remoteAim = null;
-  cam.zoom = 1; resetCoins(); snapCam(); g.phase = 'aim';
+  cam.zoom = 1; recenter(); resetCoins(); snapCam(); g.phase = 'aim';
   ['lobby', 'over', 'notice', 'settings'].forEach(id => $(id).classList.add('hidden'));
   $('hudbtns').classList.remove('hidden');
   flash(turnMsg(), 2.4, 'main');
 }
 function nextTurn() {
-  g.turn = 1 - g.turn; g.flicks = 0; cam.zoom = 1; resetCoins(); snapCam(); g.phase = 'aim';
+  g.turn = 1 - g.turn; g.flicks = 0; cam.zoom = 1; recenter(); resetCoins(); snapCam(); g.phase = 'aim';
   flash(turnMsg(), 2.2, 'main');
 }
 function doFlick(c, vx, vz, remote) {
@@ -648,11 +648,27 @@ function camTarget() {
     const O = overviewCam(), t0 = Math.min(1, (cam.zoom - ZFIT) / (ZMAX - ZFIT)), t = t0 * t0 * (3 - 2 * t0);
     T = { x: T.x + (O.x - T.x) * t, z: T.z + (O.z - T.z) * t, h: T.h + (O.h - T.h) * t, pitch: T.pitch + (O.pitch - T.pitch) * t };
   }
-  cam.tx = T.x; cam.tz = T.z; cam.th = T.h; cam.tp = T.pitch;
+  // player's WASD/arrow offset, kept within reach of the table
+  const hw = RU.tableW / 2 + 4;
+  cam.panX = Math.max(-hw - T.x, Math.min(hw - T.x, cam.panX));
+  cam.panZ = Math.max(-20 - T.z, Math.min(RU.tableL + 4 - T.z, cam.panZ));
+  cam.tx = T.x + cam.panX; cam.tz = T.z + cam.panZ; cam.th = T.h; cam.tp = T.pitch;
 }
+const panKeys = new Set();
+const PAN_DIRS = { w: [0, 1], arrowup: [0, 1], s: [0, -1], arrowdown: [0, -1], a: [-1, 0], arrowleft: [-1, 0], d: [1, 0], arrowright: [1, 0] };
+function updatePan(dt) {
+  if (!panKeys.size) return;
+  let dx = 0, dz = 0;
+  for (const k of panKeys) { const v = PAN_DIRS[k]; dx += v[0]; dz += v[1]; }
+  const len = Math.hypot(dx, dz); if (!len) return;
+  const speed = 8 + cam.h * 2; // faster when zoomed out
+  cam.panX += dx / len * speed * dt; cam.panZ += dz / len * speed * dt;
+}
+const recenter = () => { cam.panX = 0; cam.panZ = 0; };
 function snapCam() { cam.basis = null; camTarget(); cam.x = cam.tx; cam.z = cam.tz; cam.h = cam.th; cam.pitch = cam.tp; applyCamTrig(); }
 snapCam();
 function updateCam(dt) {
+  updatePan(dt);
   camTarget();
   const k = Math.min(1, dt * 4);
   cam.x += (cam.tx - cam.x) * k; cam.z += (cam.tz - cam.z) * k;
@@ -856,10 +872,10 @@ function drawHUD(t) {
   }
   if (g.phase === 'lobby') return;
   let hint = '';
-  if (canControl() && !g.aim) hint = COARSE ? 'DRAG A QUARTER BACK · PINCH TO ZOOM' : 'DRAG A QUARTER BACK · SCROLL TO ZOOM · F TO FIT';
+  if (canControl() && !g.aim) hint = COARSE ? 'DRAG A QUARTER BACK · PINCH TO ZOOM' : 'DRAG A QUARTER BACK · SCROLL ZOOM · WASD MOVE · C CENTER · F FIT';
   else if (g.phase === 'aim' && !isShooter()) hint = g.remoteAim ? 'ENEMY IS AIMING...' : 'ENEMY IS LINING UP...';
   else if (g.phase === 'sim' || g.phase === 'wait') hint = g.passed ? 'THROUGH THE GAP!' : '';
-  if (hint) txt(hint, W / 2, small ? H - 64 : H - 22, small ? 13 : 16, g.passed && g.phase !== 'aim' ? BRIGHT : GREEN, 'center', 8, 0.6 + 0.4 * Math.sin(t * 4));
+  if (hint) txt(hint, W / 2, small ? H - 64 : H - 22, Math.min(small ? 13 : 16, (W - 40) / (hint.length * 0.6)), g.passed && g.phase !== 'aim' ? BRIGHT : GREEN, 'center', 8, 0.6 + 0.4 * Math.sin(t * 4));
 }
 
 function draw(t) {
@@ -1305,11 +1321,16 @@ $('bFit').onclick = toggleFit;
 window.addEventListener('keydown', e => {
   const tag = document.activeElement && document.activeElement.tagName;
   if (tag === 'INPUT' || tag === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) return;
-  if (e.key === 'm' || e.key === 'M') $('bMute').click();
+  const k = e.key.toLowerCase();
+  if (PAN_DIRS[k]) { if (g.phase !== 'lobby') { panKeys.add(k); e.preventDefault(); } return; }
+  if (k === 'c') recenter();
+  else if (e.key === 'm' || e.key === 'M') $('bMute').click();
   else if (e.key === 'f' || e.key === 'F') toggleFit();
   else if (e.key === '+' || e.key === '=') setZoom(cam.zoom / 1.15);
   else if (e.key === '-' || e.key === '_') setZoom(cam.zoom * 1.15);
 });
+window.addEventListener('keyup', e => panKeys.delete(e.key.toLowerCase()));
+window.addEventListener('blur', () => panKeys.clear());
 const hc = (location.hash || '').replace('#', '').toUpperCase();
 if (/^[A-Z]{4}$/.test(hc)) { $('codeIn').value = hc; status('PRESS JOIN TO CONNECT TO GAME ' + hc); }
 else if (linkMsg) status(linkMsg);
@@ -1336,7 +1357,8 @@ window.QZ = {
   // run a flick to completion without waiting on animation frames
   runSim() { let n = 0; while (g.phase === 'sim' && n++ < 40000) { stepSim(); if (settled()) { onSettle(); break; } } },
   finishTimer() { if (g.after) { const f = g.after; g.after = null; g.timer = 0; f(); } },
-  pullPx, flickSpeed, inSafe, projC, overviewCam, setZoom, toggleFit, camTarget, snapCam,
+  tickCam(dt, n = 1) { for (let i = 0; i < n; i++) updateCam(dt); },
+  recenter, panKeys, pullPx, flickSpeed, inSafe, projC, overviewCam, setZoom, toggleFit, camTarget, snapCam,
   g, cfg, doFlick, resetCoins, startGame, cam, proj, rayTable, music, get RU() { return RU; }, get AC() { return AC; }, get buses() { return { master, musBus, sfxBus }; }, b64e, b64d, clean };
 })();
 </script>
