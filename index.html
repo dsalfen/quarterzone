@@ -70,6 +70,7 @@
 
 <div id="hudbtns" class="hidden">
   <button id="bMute">SOUND ON</button>
+  <button id="bFit" title="Zoom out to the whole table (F)">FIT</button>
   <button id="bQuit">QUIT</button>
 </div>
 
@@ -106,7 +107,7 @@
         <li>Point values, table size, physics and more can be changed in SETTINGS. Online, the host's rules are used.</li>
       </ul>
     </details>
-    <div class="ver">v2</div>
+    <div class="ver">v2.1</div>
   </div>
 </div>
 
@@ -153,7 +154,7 @@
 (() => {
 'use strict';
 
-const PROTO = 2;
+const PROTO = 3;
 const R = 0.5, COIN_H = 0.13, STEP = 1 / 120; // 1 unit = one quarter diameter
 
 // ---------- settings schema (single source of truth) ----------
@@ -178,7 +179,6 @@ const SETTINGS = [
   // physics
   { key: 'friction', group: 'physics', type: 'range', label: 'Table friction', min: 1, max: 15, step: 0.5, def: 6 },
   { key: 'maxPower', group: 'physics', type: 'range', label: 'Max flick power', min: 8, max: 50, step: 1, def: 26 },
-  { key: 'dragRange', group: 'physics', type: 'range', label: 'Drag distance for full power', min: 1.5, max: 6, step: 0.1, def: 3.2 },
   { key: 'bounce', group: 'physics', type: 'range', label: 'Bounciness', min: 0.2, max: 1, step: 0.05, def: 0.8 },
   { key: 'curve', group: 'physics', type: 'choice', label: 'Power curve', options: [['linear', 'Linear'], ['gentle', 'Gentle (fine control)'], ['punchy', 'Punchy']], def: 'linear' },
   // look & sound (personal)
@@ -189,6 +189,7 @@ const SETTINGS = [
   { key: 'camBack', group: 'look', type: 'range', label: 'Camera distance', min: 3, max: 14, step: 0.5, def: 7 },
   { key: 'camTilt', group: 'look', type: 'range', label: 'Camera tilt', unit: '°', min: 4, max: 35, step: 1, def: 14 },
   { key: 'fov', group: 'look', type: 'range', label: 'Field of view', unit: '°', min: 40, max: 90, step: 1, def: 60 },
+  { key: 'pullLen', group: 'look', type: 'range', label: 'Pull length for full power', help: 'Share of the screen size', unit: '%', min: 15, max: 50, step: 1, def: 28 },
   { key: 'mountains', group: 'look', type: 'bool', label: 'Mountains', def: true },
   { key: 'volcano', group: 'look', type: 'bool', label: 'Volcano', def: true },
   { key: 'moon', group: 'look', type: 'bool', label: 'Moon', def: true },
@@ -282,7 +283,9 @@ const g = {
   msg: '', msgT: 0, msgColor: null, timer: 0, after: null, pending: null,
   aim: null, remoteAim: null, hover: -1,
 };
-const cam = { x: 0, z: 0, tx: 0, tz: 0 };
+// camera: position, height and tilt ease toward targets; zoom is local-only
+const cam = { x: 0, z: 0, h: 3.2, pitch: 0.24, tx: 0, tz: 0, th: 3.2, tp: 0.24, zoom: 1, basis: null };
+const ZMIN = 0.6, ZFIT = 1.5, ZMAX = 2.5;
 
 function resetCoins() {
   const r = RU;
@@ -368,6 +371,7 @@ function wireConn(c) {
 function onMsg(m) {
   if (!m || !m.t) return;
   if ((m.t === 'hello' || m.t === 'start' || m.t === 'rematch') && m.v !== PROTO) {
+    if (m.t === 'hello') send({ t: 'hello', v: PROTO }); // so the other side can show its own notice
     showNotice(m.v > PROTO ? 'OPPONENT HAS A NEWER VERSION - REFRESH THE PAGE' : 'OPPONENT IS ON AN OLD VERSION - THEY SHOULD REFRESH THE PAGE');
     return;
   }
@@ -410,13 +414,13 @@ function startGame(starter, rules) {
   RU = clean('rules', rules || cfg.rules);
   g.scores = [0, 0]; g.starter = starter; g.turn = starter; g.flicks = 0;
   g.timer = 0; g.after = null; g.pending = null; g.aim = null; g.remoteAim = null;
-  resetCoins(); snapCam(); g.phase = 'aim';
+  cam.zoom = 1; resetCoins(); snapCam(); g.phase = 'aim';
   ['lobby', 'over', 'notice', 'settings'].forEach(id => $(id).classList.add('hidden'));
   $('hudbtns').classList.remove('hidden');
   flash(turnMsg(), 2.4, 'main');
 }
 function nextTurn() {
-  g.turn = 1 - g.turn; g.flicks = 0; resetCoins(); snapCam(); g.phase = 'aim';
+  g.turn = 1 - g.turn; g.flicks = 0; cam.zoom = 1; resetCoins(); snapCam(); g.phase = 'aim';
   flash(turnMsg(), 2.2, 'main');
 }
 function doFlick(c, vx, vz, remote) {
@@ -575,12 +579,17 @@ function settled() {
 const cv = $('cv'), ctx = cv.getContext('2d');
 let W = 0, H = 0, F = 1, DPR = 1, HZ = 0, sinP = 0, cosP = 1, CAM_H = 3.2;
 function updateView() {
-  const L = cfg.look, pitch = L.camTilt * Math.PI / 180;
-  sinP = Math.sin(pitch); cosP = Math.cos(pitch); CAM_H = L.camHeight;
+  const L = cfg.look;
   const vHalf = L.fov * Math.PI / 360, hHalf = (W < H ? 0.45 : 0.62) * (L.fov / 60);
   F = Math.min((H / 2) / Math.tan(vHalf), (W / 2) / Math.tan(hHalf));
-  HZ = H / 2 - Math.tan(pitch) * F;
+  applyCamTrig();
 }
+function applyCamTrig() {
+  sinP = Math.sin(cam.pitch); cosP = Math.cos(cam.pitch); CAM_H = cam.h;
+  HZ = H / 2 - Math.tan(cam.pitch) * F;
+}
+// full-power pull, in screen pixels, identical for every quarter and camera position
+const pullPx = () => Math.max(90, Math.min(320, Math.min(W, H) * cfg.look.pullLen / 100));
 function resize() {
   DPR = Math.min(2, window.devicePixelRatio || 1);
   W = window.innerWidth; H = window.innerHeight;
@@ -590,20 +599,68 @@ function resize() {
 }
 window.addEventListener('resize', resize); resize();
 
-function camTarget() {
-  const live = g.coins.filter(c => !c.fallen);
-  if (!live.length) return;
-  const minZ = Math.min(...live.map(c => c.z));
-  const mx = live.reduce((s, c) => s + c.x, 0) / live.length;
-  cam.tz = Math.min(minZ - cfg.look.camBack, RU.tableL - 12); cam.tx = mx * 0.7;
+// project with an arbitrary camera {x, z, h, s: sin(pitch), c: cos(pitch)}
+function projC(C, x, y, z) {
+  const dx = x - C.x, dy = y - C.h, dz = z - C.z;
+  const cy = dy * C.c + dz * C.s, cz = -dy * C.s + dz * C.c;
+  if (cz < 0.05) return null;
+  return [W / 2 + dx / cz * F, H / 2 - cy / cz * F];
 }
-function snapCam() { camTarget(); cam.x = cam.tx; cam.z = cam.tz; }
+const safeTop = () => Math.min(H * 0.3, 150);
+function inSafe(p) {
+  return p && p[0] >= W * 0.06 && p[0] <= W * 0.94 && p[1] >= safeTop() && p[1] <= H - pullPx() * 0.85;
+}
+// high camera that fits the whole table in the window
+let ovCache = null;
+function overviewCam() {
+  const key = [W, H, F, RU.tableW, RU.tableL].join();
+  if (ovCache && ovCache.key === key) return ovCache.v;
+  const pitch = 55 * Math.PI / 180, s = Math.sin(pitch), c = Math.cos(pitch), hw = RU.tableW / 2, TL = RU.tableL;
+  const corners = [[-hw, 0], [hw, 0], [-hw, TL], [hw, TL]];
+  let v = null;
+  for (let D = 4; D < 600; D *= 1.05) {
+    const C = { x: 0, z: TL / 2 - D * c, h: D * s, s, c };
+    v = { x: 0, z: C.z, h: C.h, pitch };
+    if (corners.every(([x, z]) => { const p = projC(C, x, 0, z); return p && p[0] >= W * 0.04 && p[0] <= W * 0.96 && p[1] >= Math.min(H * 0.2, 110) && p[1] <= H - 50; })) break;
+  }
+  ovCache = { key, v };
+  return v;
+}
+function camTarget() {
+  // follow the quarters while aiming; during a flick keep framing where they started
+  if (g.phase === 'aim' || g.phase === 'lobby' || !cam.basis) {
+    const live = g.coins.filter(c => !c.fallen);
+    if (live.length) cam.basis = live.map(c => ({ x: c.x, z: c.z }));
+  }
+  const B = cam.basis; if (!B || !B.length) return;
+  const L = cfg.look, zn = Math.min(cam.zoom, ZFIT), pitch = L.camTilt * Math.PI / 180;
+  const s = Math.sin(pitch), c = Math.cos(pitch);
+  const xs = B.map(p => p.x), mid = (Math.min(...xs) + Math.max(...xs)) / 2, minZ = Math.min(...B.map(p => p.z));
+  // start from the requested zoom and back away until every quarter is on screen
+  let C = null;
+  for (let k = 0; k <= 30; k++) {
+    const f = 1 + 0.1 * k;
+    C = { x: mid, z: Math.min(minZ - L.camBack * zn * f, RU.tableL - 12), h: L.camHeight * zn * f, s, c };
+    if (B.every(p => inSafe(projC(C, p.x, 0, p.z)))) break;
+  }
+  let T = { x: C.x, z: C.z, h: C.h, pitch };
+  if (cam.zoom > ZFIT) {
+    const O = overviewCam(), t0 = Math.min(1, (cam.zoom - ZFIT) / (ZMAX - ZFIT)), t = t0 * t0 * (3 - 2 * t0);
+    T = { x: T.x + (O.x - T.x) * t, z: T.z + (O.z - T.z) * t, h: T.h + (O.h - T.h) * t, pitch: T.pitch + (O.pitch - T.pitch) * t };
+  }
+  cam.tx = T.x; cam.tz = T.z; cam.th = T.h; cam.tp = T.pitch;
+}
+function snapCam() { cam.basis = null; camTarget(); cam.x = cam.tx; cam.z = cam.tz; cam.h = cam.th; cam.pitch = cam.tp; applyCamTrig(); }
 snapCam();
 function updateCam(dt) {
-  if (g.phase === 'aim' || g.phase === 'lobby') camTarget();
-  const k = Math.min(1, dt * 2.5);
+  camTarget();
+  const k = Math.min(1, dt * 4);
   cam.x += (cam.tx - cam.x) * k; cam.z += (cam.tz - cam.z) * k;
+  cam.h += (cam.th - cam.h) * k; cam.pitch += (cam.tp - cam.pitch) * k;
+  applyCamTrig();
 }
+const setZoom = z => { cam.zoom = Math.max(ZMIN, Math.min(ZMAX, z)); };
+const toggleFit = () => setZoom(cam.zoom >= ZMAX - 0.05 ? 1 : ZMAX);
 function toCam(x, y, z) {
   const dx = x - cam.x, dy = y - CAM_H, dz = z - cam.z;
   return [dx, dy * cosP + dz * sinP, -dy * sinP + dz * cosP];
@@ -721,30 +778,29 @@ function drawCoin(c, color, width) {
     seg(c.x - R * 0.45, yt, c.z, c.x + R * 0.45, yt, c.z);
   });
 }
+// slide distance = maxPower²/(2·friction) × curve(pull), so 'linear' means even distance per pixel pulled
 function curveP(p) { return RU.curve === 'gentle' ? p * p : RU.curve === 'punchy' ? Math.sqrt(p) : p; }
-function aimVec(a) {
-  const len = Math.hypot(a.dx, a.dz);
-  return { len, p: curveP(Math.min(1, len / RU.dragRange)), ux: len ? a.dx / len : 0, uz: len ? a.dz / len : 0 };
-}
+const flickSpeed = p => RU.maxPower * Math.sqrt(curveP(Math.max(0, Math.min(1, p))));
+// aim = { c: coin, ux/uz: table-space direction, p: pull 0..1 }
 function drawAim(a) {
-  const c = g.coins[a.c]; if (!c) return;
-  const v = aimVec(a); if (v.len < 0.05) return;
+  const c = g.coins[a.c]; if (!c || !(a.p > 0.005)) return;
   const others = [0, 1, 2].filter(i => i !== a.c).map(i => g.coins[i]);
   pen(RED, 1.4, 8, () => dashed(others[0].x, others[0].z, others[1].x, others[1].z, 0.01, 0.25, 0.2));
-  pen(DIM, 1.2, 0, () => seg(c.x, 0.02, c.z, c.x - a.dx, 0.02, c.z - a.dz));
-  const L = 1.5 + v.p * 9, ex = c.x + v.ux * L, ez = c.z + v.uz * L;
-  const col = v.p > 0.85 ? RED : BRIGHT;
+  const band = 0.6 + a.p * 2.4;
+  pen(DIM, 1.2, 0, () => seg(c.x, 0.02, c.z, c.x - a.ux * band, 0.02, c.z - a.uz * band));
+  const L = 1.5 + a.p * 9, ex = c.x + a.ux * L, ez = c.z + a.uz * L, full = a.p >= 0.999;
+  const col = full ? RED : BRIGHT;
   pen(col, 2, 10, () => {
     seg(c.x, 0.02, c.z, ex, 0.02, ez);
-    const bx = -v.uz, bz = v.ux, h = 0.7;
-    seg(ex, 0.02, ez, ex - v.ux * h + bx * h * 0.5, 0.02, ez - v.uz * h + bz * h * 0.5);
-    seg(ex, 0.02, ez, ex - v.ux * h - bx * h * 0.5, 0.02, ez - v.uz * h - bz * h * 0.5);
+    const bx = -a.uz, bz = a.ux, h = 0.7;
+    seg(ex, 0.02, ez, ex - a.ux * h + bx * h * 0.5, 0.02, ez - a.uz * h + bz * h * 0.5);
+    seg(ex, 0.02, ez, ex - a.ux * h - bx * h * 0.5, 0.02, ez - a.uz * h - bz * h * 0.5);
   });
   const bh = Math.min(240, H * 0.35), bw = 14, bxp = W - 34, byp = H / 2 - bh / 2 + 40;
-  pen(GREEN, 1.2, 6, () => ctx.rect(bxp, byp, bw, bh));
+  pen(GREEN, 1.2, 6, () => { ctx.rect(bxp, byp, bw, bh); ctx.moveTo(bxp - 5, byp + 3); ctx.lineTo(bxp + bw + 5, byp + 3); });
   ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 10 * GLOWK;
-  ctx.fillRect(bxp + 3, byp + bh - 3 - (bh - 6) * v.p, bw - 6, (bh - 6) * v.p); ctx.shadowBlur = 0;
-  txt('PWR', bxp + bw / 2, byp - 14, 13, GREEN, 'center', 6);
+  ctx.fillRect(bxp + 3, byp + bh - 3 - (bh - 6) * a.p, bw - 6, (bh - 6) * a.p); ctx.shadowBlur = 0;
+  txt(full ? 'MAX' : 'PWR', bxp + bw / 2, byp - 14, 13, full ? RED : GREEN, 'center', 6);
 }
 
 // ---------- HUD ----------
@@ -800,7 +856,7 @@ function drawHUD(t) {
   }
   if (g.phase === 'lobby') return;
   let hint = '';
-  if (canControl() && !g.aim) hint = 'DRAG ANY QUARTER BACK - RELEASE TO FLICK';
+  if (canControl() && !g.aim) hint = COARSE ? 'DRAG A QUARTER BACK · PINCH TO ZOOM' : 'DRAG A QUARTER BACK · SCROLL TO ZOOM · F TO FIT';
   else if (g.phase === 'aim' && !isShooter()) hint = g.remoteAim ? 'ENEMY IS AIMING...' : 'ENEMY IS LINING UP...';
   else if (g.phase === 'sim' || g.phase === 'wait') hint = g.passed ? 'THROUGH THE GAP!' : '';
   if (hint) txt(hint, W / 2, small ? H - 64 : H - 22, small ? 13 : 16, g.passed && g.phase !== 'aim' ? BRIGHT : GREEN, 'center', 8, 0.6 + 0.4 * Math.sin(t * 4));
@@ -845,37 +901,69 @@ function sendAim(force) {
   const now = performance.now();
   if (!force && now - lastAimSend < 66) return;
   lastAimSend = now;
-  send(g.aim ? { t: 'aim', c: g.aim.c, dx: +g.aim.dx.toFixed(3), dz: +g.aim.dz.toFixed(3) } : { t: 'aim', c: -1 });
+  send(g.aim ? { t: 'aim', c: g.aim.c, ux: +g.aim.ux.toFixed(4), uz: +g.aim.uz.toFixed(4), p: +g.aim.p.toFixed(3) } : { t: 'aim', c: -1 });
 }
+// pull measured in screen pixels (same feel for every quarter); direction mapped onto the table
+function updateAim(sx, sy) {
+  const a = g.aim, c = g.coins[a.c], p = proj(c.x, 0, c.z);
+  if (!p) return;
+  const dx = sx - p[0], dy = sy - p[1], len = Math.hypot(dx, dy);
+  if (len < 3) { a.p = 0; return; }
+  const ux = -dx / len, uy = -dy / len; // aim opposite the pull
+  for (const step of [12, 6, 3, 1.5]) {
+    const h0 = rayTable(p[0], p[1]), h1 = rayTable(p[0] + ux * step, p[1] + uy * step);
+    if (!h0 || !h1) continue;
+    const L = Math.hypot(h1.x - h0.x, h1.z - h0.z);
+    if (L < 1e-6) continue;
+    a.ux = (h1.x - h0.x) / L; a.uz = (h1.z - h0.z) / L;
+    break;
+  }
+  a.p = Math.min(1, len / pullPx());
+}
+const COARSE = window.matchMedia && matchMedia('(pointer: coarse)').matches;
+const touches = new Map(); let pinch = null;
+const touchDist = () => { const [a, b] = [...touches.values()]; return Math.hypot(a.x - b.x, a.y - b.y) || 1; };
 cv.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'touch') {
+    touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touches.size === 2) {
+      if (g.aim) { g.aim = null; sendAim(true); }
+      pinch = { d: touchDist(), z: cam.zoom };
+      return;
+    }
+    if (touches.size > 2) return;
+  }
   if (!canControl()) return;
   const i = pickCoin(e.clientX, e.clientY);
   if (i < 0) return;
-  g.aim = { c: i, dx: 0, dz: 0 };
-  cv.setPointerCapture(e.pointerId);
+  g.aim = { c: i, ux: 0, uz: 1, p: 0 };
+  try { cv.setPointerCapture(e.pointerId); } catch (err) {}
   e.preventDefault();
 });
 cv.addEventListener('pointermove', e => {
+  if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && touches.size >= 2) { setZoom(pinch.z * pinch.d / touchDist()); return; }
   if (!g.aim) { g.hover = canControl() ? pickCoin(e.clientX, e.clientY) : -1; cv.style.cursor = g.hover >= 0 ? 'grab' : 'crosshair'; return; }
-  const hit = rayTable(e.clientX, e.clientY);
-  if (!hit) return;
-  const c = g.coins[g.aim.c], DMAX = RU.dragRange;
-  let dx = c.x - hit.x, dz = c.z - hit.z;
-  const len = Math.hypot(dx, dz);
-  if (len > DMAX) { dx *= DMAX / len; dz *= DMAX / len; }
-  g.aim.dx = dx; g.aim.dz = dz;
+  updateAim(e.clientX, e.clientY);
   sendAim(false);
 });
-function release() {
+function endTouch(e) { touches.delete(e.pointerId); if (touches.size < 2) pinch = null; }
+function release(e) {
+  if (e) endTouch(e);
   if (!g.aim) return;
-  const a = g.aim, v = aimVec(a);
+  const a = g.aim;
   g.aim = null;
-  if (v.len < 0.2 || !canControl()) { sendAim(true); return; }
-  const sp = v.p * RU.maxPower;
-  doFlick(a.c, v.ux * sp, v.uz * sp, false);
+  if (a.p < 0.03 || !canControl()) { sendAim(true); return; }
+  const sp = flickSpeed(a.p);
+  doFlick(a.c, a.ux * sp, a.uz * sp, false);
 }
 cv.addEventListener('pointerup', release);
-cv.addEventListener('pointercancel', () => { g.aim = null; sendAim(true); });
+cv.addEventListener('pointercancel', e => { endTouch(e); g.aim = null; sendAim(true); });
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const d = Math.max(-1, Math.min(1, e.deltaY / 100));
+  setZoom(cam.zoom * Math.exp(d * 0.12));
+}, { passive: false });
 
 // ---------- audio graph ----------
 let AC = null, master, sfxBus, musBus, duckG, echoIn, noiseBuf, muted = false;
@@ -1063,7 +1151,7 @@ function rulesSummary(r) {
   if (r.bumpRule === 'miss') p.push('NO TOUCHING');
   if (r.maxFlicks) p.push(`${r.maxFlicks} FLICKS/TURN`);
   p.push(`TABLE ${r.tableW}×${r.tableL}`);
-  if (['friction', 'maxPower', 'dragRange', 'bounce', 'curve'].some(k => r[k] !== DEF.rules[k])) p.push('CUSTOM PHYSICS');
+  if (['friction', 'maxPower', 'bounce', 'curve'].some(k => r[k] !== DEF.rules[k])) p.push('CUSTOM PHYSICS');
   return p.join(' · ');
 }
 function presetName(r) {
@@ -1213,9 +1301,14 @@ $('bMenu').onclick = toMenu;
 $('bNoticeOk').onclick = toMenu;
 $('bQuit').onclick = () => { if (confirm('Quit this game?')) toMenu(); };
 $('bMute').onclick = () => { muted = !muted; $('bMute').textContent = muted ? 'SOUND OFF' : 'SOUND ON'; applyVolumes(); };
+$('bFit').onclick = toggleFit;
 window.addEventListener('keydown', e => {
   const tag = document.activeElement && document.activeElement.tagName;
-  if ((e.key === 'm' || e.key === 'M') && tag !== 'INPUT' && tag !== 'SELECT') $('bMute').click();
+  if (tag === 'INPUT' || tag === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === 'm' || e.key === 'M') $('bMute').click();
+  else if (e.key === 'f' || e.key === 'F') toggleFit();
+  else if (e.key === '+' || e.key === '=') setZoom(cam.zoom / 1.15);
+  else if (e.key === '-' || e.key === '_') setZoom(cam.zoom * 1.15);
 });
 const hc = (location.hash || '').replace('#', '').toUpperCase();
 if (/^[A-Z]{4}$/.test(hc)) { $('codeIn').value = hc; status('PRESS JOIN TO CONNECT TO GAME ' + hc); }
@@ -1243,6 +1336,7 @@ window.QZ = {
   // run a flick to completion without waiting on animation frames
   runSim() { let n = 0; while (g.phase === 'sim' && n++ < 40000) { stepSim(); if (settled()) { onSettle(); break; } } },
   finishTimer() { if (g.after) { const f = g.after; g.after = null; g.timer = 0; f(); } },
+  pullPx, flickSpeed, inSafe, projC, overviewCam, setZoom, toggleFit, camTarget, snapCam,
   g, cfg, doFlick, resetCoins, startGame, cam, proj, rayTable, music, get RU() { return RU; }, get AC() { return AC; }, get buses() { return { master, musBus, sfxBus }; }, b64e, b64d, clean };
 })();
 </script>
